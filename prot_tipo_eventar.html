@@ -1,0 +1,2091 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eventar - Protótipo Interativo</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: #f3f4f6;
+        }
+        #root {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .app-container {
+            width: 100%;
+            max-width: 400px;
+            min-width: 0;
+            height: 800px;
+            max-height: 100vh;
+            margin: 0 auto;
+            background-color: #ffffff;
+            position: relative;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            border-radius: 2rem;
+            border: 8px solid #1f2937;
+            box-sizing: border-box;
+        }
+        @media (max-width: 400px) {
+            .app-container {
+                border-radius: 0;
+                border: none;
+                height: 100vh;
+            }
+        }
+        .scrollable-content {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding-bottom: 84px;
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="flex items-center justify-center min-h-screen">
+
+<div id="root"></div>
+
+<script type="text/babel">
+    const { useState } = React;
+
+    // --- HELPERS DE FORMATAÇÃO E VALIDAÇÃO DE DATA/HORÁRIO ---
+    const formatDateBR = (isoDate) => {
+        if (!isoDate) return '';
+        if (isoDate.includes('/')) return isoDate;
+        const parts = isoDate.split('-');
+        if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+        return isoDate;
+    };
+
+    const formatEventPeriod = (ev) => {
+        if (!ev) return 'Data a definir';
+        const dateStr = ev.date ? formatDateBR(ev.date) : '';
+        const timeStr = ev.startTime 
+            ? `${ev.startTime}${ev.endTime ? ` às ${ev.endTime}` : ''}`
+            : '';
+        if (dateStr && timeStr) return `${dateStr} • ${timeStr}`;
+        if (dateStr) return dateStr;
+        if (timeStr) return timeStr;
+        return 'Data a definir';
+    };
+
+    const formatScheduleDescription = (ev) => {
+        const dateStr = ev.date ? formatDateBR(ev.date) : 'Data a definir';
+        const timeStr = ev.startTime
+            ? `${ev.startTime}${ev.endTime ? ` às ${ev.endTime}` : ''}`
+            : 'Horário a definir';
+        return `${dateStr} - ${timeStr}`;
+    };
+
+    const formatPollPeriod = (poll) => {
+        if (!poll || !poll.endDate) return 'Prazo não definido';
+        const dateStr = formatDateBR(poll.endDate);
+        const timeStr = poll.endTime ? ` às ${poll.endTime}` : '';
+        return `Até ${dateStr}${timeStr}`;
+    };
+
+    const getPollRemainingText = (poll) => {
+        if (!poll || poll.status === 'Encerrada') return 'Encerrada';
+        if (!poll.endDate) return 'Sem limite';
+        const target = new Date(`${poll.endDate}T${poll.endTime || '23:59'}:00`);
+        const now = new Date();
+        const diffMs = target - now;
+        if (isNaN(target.getTime())) return formatPollPeriod(poll);
+        if (diffMs <= 0) return 'Prazo expirado';
+        const totalHours = Math.floor(diffMs / (1000 * 60 * 60));
+        const days = Math.floor(totalHours / 24);
+        const hours = totalHours % 24;
+        const mins = Math.floor((diffMs / (1000 * 60)) % 60);
+        if (days > 0) return `${days}d ${hours}h restantes`;
+        if (hours > 0) return `${hours}h ${mins}min restantes`;
+        return `${mins}min restantes`;
+    };
+
+    const timeToMinutes = (timeStr) => {
+        if (!timeStr) return null;
+        const [h, m] = timeStr.split(':').map(Number);
+        if (isNaN(h) || isNaN(m)) return null;
+        return h * 60 + m;
+    };
+
+    const hasScheduleConflict = (scheduleList, candidateEvent) => {
+        if (!candidateEvent || !candidateEvent.date) return null;
+        return scheduleList.find(item => {
+            if (item.date !== candidateEvent.date) return false;
+            const itemStart = timeToMinutes(item.startTime);
+            const itemEnd = timeToMinutes(item.endTime) ?? (itemStart !== null ? itemStart + 60 : null);
+            const candStart = timeToMinutes(candidateEvent.startTime);
+            const candEnd = timeToMinutes(candidateEvent.endTime) ?? (candStart !== null ? candStart + 60 : null);
+
+            if (itemStart === null || candStart === null) return true;
+            return candStart < itemEnd && candEnd > itemStart;
+        }) || null;
+    };
+
+    // --- DADOS INICIAIS DO APLICATIVO ---
+    const initialData = {
+        user: {
+            name: 'Você',
+            email: 'usuario@eventar.com'
+        },
+        schedule: [
+            {
+                id: 1,
+                title: 'Reunião de Alinhamento',
+                group: 'Equipe de Design',
+                date: '2026-12-20',
+                startTime: '14:00',
+                endTime: '16:00',
+                description: '20/12/2026 - 14:00 às 16:00',
+                location: 'Sala Virtual / Meet'
+            },
+            {
+                id: 2,
+                title: 'Jantar de Fim de Ano',
+                group: 'Amigos da Faculdade',
+                date: '2026-12-28',
+                startTime: '20:00',
+                endTime: '23:00',
+                description: '28/12/2026 - 20:00 às 23:00',
+                location: 'Restaurante Savassi'
+            }
+        ],
+        groups: [
+            {
+                id: 1,
+                name: 'Equipe de Design',
+                members: ['Você', 'Ana', 'Carlos', 'Mariana', 'João', 'Paula'],
+                events: [
+                    {
+                        id: 1001,
+                        title: 'Reunião de Alinhamento',
+                        date: '2026-12-20',
+                        startTime: '14:00',
+                        endTime: '16:00',
+                        location: 'Sala Virtual / Meet',
+                        participants: ['Você', 'Ana', 'Carlos', 'Mariana']
+                    }
+                ],
+                notices: []
+            },
+            {
+                id: 2,
+                name: 'Amigos da Faculdade',
+                members: ['Você', 'Lucas', 'Fernanda', 'Rafael', 'Camila', 'Bruno', 'Juliana', 'Pedro'],
+                events: [
+                    {
+                        id: 1002,
+                        title: 'Jantar de Fim de Ano',
+                        date: '2026-12-28',
+                        startTime: '20:00',
+                        endTime: '23:00',
+                        location: 'Restaurante Savassi',
+                        participants: ['Você', 'Lucas', 'Fernanda', 'Rafael']
+                    }
+                ],
+                notices: []
+            }
+        ],
+        events: [
+            {
+                id: 1,
+                name: 'Salão de Festas XYZ',
+                location: 'Centro',
+                date: '2026-12-25',
+                startTime: '14:00',
+                endTime: '22:00',
+                dates: '25/12/2026 • 14:00 às 22:00',
+                link: 'https://exemplo.com/salao-xyz'
+            },
+            {
+                id: 2,
+                name: 'Restaurante ABC',
+                location: 'Savassi',
+                date: '2026-12-30',
+                startTime: '19:00',
+                endTime: '23:30',
+                dates: '30/12/2026 • 19:00 às 23:30',
+                link: 'https://exemplo.com/restaurante-abc'
+            },
+            {
+                id: 3,
+                name: 'Sítio Recanto',
+                location: 'Zona Rural',
+                date: '2026-12-20',
+                startTime: '14:30',
+                endTime: '19:00',
+                dates: '20/12/2026 • 14:30 às 19:00',
+                link: ''
+            }
+        ],
+        polls: [
+            {
+                id: 1,
+                name: 'Data da Confraternização',
+                status: 'Aberta',
+                group: 'Equipe de Design',
+                endDate: '2026-12-15',
+                endTime: '18:00',
+                createdAt: '18/11/2026 às 09:00',
+                options: [
+                    {
+                        id: 101,
+                        text: 'Salão de Festas XYZ',
+                        eventName: 'Salão de Festas XYZ',
+                        location: 'Centro',
+                        date: '2026-12-25',
+                        startTime: '14:00',
+                        endTime: '22:00',
+                        votes: 2,
+                        voters: ['Ana', 'Carlos']
+                    },
+                    {
+                        id: 102,
+                        text: 'Restaurante ABC',
+                        eventName: 'Restaurante ABC',
+                        location: 'Savassi',
+                        date: '2026-12-30',
+                        startTime: '19:00',
+                        endTime: '23:30',
+                        votes: 2,
+                        voters: ['Mariana', 'João']
+                    },
+                    {
+                        id: 103,
+                        text: 'Indisponível',
+                        isUnavailable: true,
+                        votes: 1,
+                        voters: ['Paula']
+                    }
+                ]
+            },
+            {
+                id: 2,
+                name: 'Local do Churrasco',
+                status: 'Encerrada',
+                group: 'Amigos da Faculdade',
+                endDate: '2026-11-15',
+                endTime: '20:00',
+                createdAt: '10/11/2026 às 14:00',
+                winnerOptionId: 201,
+                options: [
+                    {
+                        id: 201,
+                        text: 'Sítio Recanto',
+                        eventName: 'Sítio Recanto',
+                        location: 'Zona Rural',
+                        date: '2026-11-28',
+                        startTime: '11:00',
+                        endTime: '18:00',
+                        votes: 5,
+                        voters: ['Lucas', 'Fernanda', 'Rafael', 'Camila', 'Bruno']
+                    },
+                    {
+                        id: 202,
+                        text: 'Churrascaria Central',
+                        eventName: 'Churrascaria Central',
+                        location: 'Centro',
+                        date: '2026-11-29',
+                        startTime: '12:00',
+                        endTime: '16:00',
+                        votes: 2,
+                        voters: ['Juliana', 'Pedro']
+                    },
+                    {
+                        id: 203,
+                        text: 'Indisponível',
+                        isUnavailable: true,
+                        votes: 1,
+                        voters: ['Carla']
+                    }
+                ]
+            }
+        ],
+        notifications: [
+            {
+                id: 1,
+                type: 'poll',
+                title: 'Nova enquete aberta!',
+                message: 'Equipe de Design abriu a enquete "Data da Confraternização".',
+                time: 'Há 10 min',
+                pollId: 1,
+                unread: true
+            },
+            {
+                id: 2,
+                type: 'reminder',
+                title: 'Evento próximo na agenda',
+                message: 'Reunião de Alinhamento marcada para 20/12/2026 às 14:00.',
+                time: 'Há 2 horas',
+                unread: false
+            }
+        ]
+    };
+
+    const App = () => {
+        const [currentScene, setCurrentScene] = useState('C1');
+        const [data, setData] = useState(initialData);
+        const [activeGroupId, setActiveGroupId] = useState(1);
+        const [activePollId, setActivePollId] = useState(1);
+        const [toast, setToast] = useState(null);
+
+        const activeGroup = data.groups.find(g => g.id === activeGroupId) || data.groups[0] || null;
+        const activePoll = data.polls.find(p => p.id === activePollId) || data.polls[0] || null;
+
+        const showToast = (message, type = 'info') => {
+            setToast({ message, type });
+            setTimeout(() => {
+                setToast(prev => (prev && prev.message === message ? null : prev));
+            }, 4000);
+        };
+
+        const navigate = (scene, params = {}) => {
+            if (params.group) setActiveGroupId(params.group.id);
+            if (params.poll) setActivePollId(params.poll.id);
+            setCurrentScene(scene);
+        };
+
+        // --- CENA C1: REALIZAR LOGIN ---
+        const SceneLogin = () => {
+            const [mode, setMode] = useState('login');
+            const [email, setEmail] = useState('usuario@eventar.com');
+            const [password, setPassword] = useState('123456');
+            const [confirmPassword, setConfirmPassword] = useState('');
+
+            const handleAuth = (e) => {
+                e.preventDefault();
+                if (!email.trim() || !password.trim()) {
+                    showToast('E-mail ou senha incorretos! Preencha todos os campos.', 'error');
+                    return;
+                }
+                if (mode === 'register') {
+                    if (password !== confirmPassword) {
+                        showToast('As senhas não coincidem!', 'error');
+                        return;
+                    }
+                    setData(prev => ({
+                        ...prev,
+                        user: { ...prev.user, email: email.trim() }
+                    }));
+                    showToast('Conta criada com sucesso! Bem-vindo ao Eventar.', 'success');
+                    navigate('C2');
+                    return;
+                }
+                if (password.length < 4) {
+                    showToast('E-mail ou senha incorretos!', 'error');
+                    return;
+                }
+                setData(prev => ({
+                    ...prev,
+                    user: { ...prev.user, email: email.trim() }
+                }));
+                showToast('Acesso liberado!', 'success');
+                navigate('C2');
+            };
+
+            return (
+                <div className="p-6 flex flex-col justify-center min-h-full bg-gradient-to-b from-indigo-50 to-white">
+                    <div className="text-center mb-8">
+                        <div className="w-16 h-16 bg-indigo-600 text-white rounded-2xl flex items-center justify-center mx-auto mb-3 shadow-lg">
+                            <i className="fa-solid fa-calendar-check text-3xl"></i>
+                        </div>
+                        <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Eventar</h1>
+                        <p className="text-sm text-gray-500 mt-1">Organize compromissos e eventos em grupo</p>
+                    </div>
+
+                    <div className="flex bg-gray-100 p-1 rounded-xl mb-6">
+                        <button
+                            type="button"
+                            onClick={() => setMode('login')}
+                            className={`flex-1 py-2 text-sm font-bold rounded-lg transition ${mode === 'login' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500'}`}
+                        >
+                            Acessar Conta
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setMode('register')}
+                            className={`flex-1 py-2 text-sm font-bold rounded-lg transition ${mode === 'register' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500'}`}
+                        >
+                            Criar Conta
+                        </button>
+                    </div>
+
+                    <form onSubmit={handleAuth} className="space-y-4">
+                        <div>
+                            <label className="block text-xs font-bold text-gray-700 uppercase mb-1">E-mail</label>
+                            <input
+                                type="email"
+                                value={email}
+                                onChange={e => setEmail(e.target.value)}
+                                className="w-full p-3 border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                placeholder="seu@email.com"
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Senha</label>
+                            <input
+                                type="password"
+                                value={password}
+                                onChange={e => setPassword(e.target.value)}
+                                className="w-full p-3 border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                placeholder="••••••"
+                            />
+                        </div>
+
+                        {mode === 'register' && (
+                            <div>
+                                <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Confirmar Senha</label>
+                                <input
+                                    type="password"
+                                    value={confirmPassword}
+                                    onChange={e => setConfirmPassword(e.target.value)}
+                                    className="w-full p-3 border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                    placeholder="••••••"
+                                />
+                            </div>
+                        )}
+
+                        <button
+                            type="submit"
+                            className="w-full bg-indigo-600 text-white font-bold py-3.5 rounded-xl shadow-md hover:bg-indigo-700 transition mt-2"
+                        >
+                            Continuar
+                        </button>
+                    </form>
+                </div>
+            );
+        };
+
+        // --- CENA C2: IR AO INÍCIO ---
+        const SceneHome = () => {
+            const openPollsCount = data.polls.filter(p => p.status === 'Aberta').length;
+            const unreadNotifs = data.notifications.filter(n => n.unread).length;
+
+            return (
+                <div className="p-4">
+                    <div className="flex justify-between items-center mb-6">
+                        <div>
+                            <p className="text-xs text-gray-500 font-medium">Bem-vindo ao Eventar</p>
+                            <h2 className="text-2xl font-bold text-gray-800">Início</h2>
+                        </div>
+                        <button
+                            onClick={() => navigate('C7')}
+                            className="relative w-10 h-10 bg-white rounded-full shadow-sm border border-gray-100 flex items-center justify-center text-gray-600 hover:text-indigo-600"
+                        >
+                            <i className="fa-solid fa-bell"></i>
+                            {unreadNotifs > 0 && (
+                                <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                                    {unreadNotifs}
+                                </span>
+                            )}
+                        </button>
+                    </div>
+
+                    {/* Cards principais previstos na C2 */}
+                    <div className="grid grid-cols-1 gap-3 mb-6">
+                        <div
+                            onClick={() => navigate('C3')}
+                            className="bg-indigo-600 text-white p-4 rounded-2xl shadow-md cursor-pointer hover:bg-indigo-700 transition flex items-center justify-between"
+                        >
+                            <div>
+                                <p className="text-xs uppercase tracking-wider text-indigo-200 font-semibold">Minha Agenda</p>
+                                <h3 className="text-lg font-bold mt-0.5">Compromissos</h3>
+                                <p className="text-xs text-indigo-100 mt-1">{data.schedule.length} compromisso(s) agendado(s)</p>
+                            </div>
+                            <div className="w-12 h-12 bg-white/15 rounded-xl flex items-center justify-center text-2xl">
+                                <i className="fa-solid fa-calendar-days"></i>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                            <div
+                                onClick={() => navigate('C4')}
+                                className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 cursor-pointer hover:border-indigo-200 transition"
+                            >
+                                <div className="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center mb-3">
+                                    <i className="fa-solid fa-users text-lg"></i>
+                                </div>
+                                <h3 className="font-bold text-gray-800">Meus Grupos</h3>
+                                <p className="text-xs text-gray-500 mt-0.5">{data.groups.length} grupo(s)</p>
+                            </div>
+
+                            <div
+                                onClick={() => navigate('C9')}
+                                className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 cursor-pointer hover:border-indigo-200 transition"
+                            >
+                                <div className="w-10 h-10 bg-amber-100 text-amber-600 rounded-xl flex items-center justify-center mb-3">
+                                    <i className="fa-solid fa-square-poll-vertical text-lg"></i>
+                                </div>
+                                <h3 className="font-bold text-gray-800">Enquetes</h3>
+                                <p className="text-xs text-gray-500 mt-0.5">{openPollsCount} aberta(s)</p>
+                            </div>
+                        </div>
+
+                        <div
+                            onClick={() => navigate('C12')}
+                            className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 cursor-pointer hover:border-indigo-200 transition flex items-center justify-between"
+                        >
+                            <div className="flex items-center">
+                                <div className="w-10 h-10 bg-purple-100 text-purple-600 rounded-xl flex items-center justify-center mr-3">
+                                    <i className="fa-solid fa-map-location-dot"></i>
+                                </div>
+                                <div>
+                                    <h3 className="font-bold text-gray-800">Eventos e Locais</h3>
+                                    <p className="text-xs text-gray-500">{data.events.length} opções cadastradas</p>
+                                </div>
+                            </div>
+                            <i className="fa-solid fa-chevron-right text-gray-400"></i>
+                        </div>
+                    </div>
+
+                    {/* Próximos compromissos resumidos */}
+                    <div>
+                        <div className="flex justify-between items-center mb-2">
+                            <h4 className="text-sm font-bold text-gray-700">Próximos Compromissos</h4>
+                            <button onClick={() => navigate('C3')} className="text-xs text-indigo-600 font-semibold">Ver todos</button>
+                        </div>
+                        {data.schedule.length === 0 ? (
+                            <p className="text-xs text-gray-400 bg-white p-4 rounded-xl border border-gray-100 text-center">Nenhum compromisso marcado.</p>
+                        ) : (
+                            <div className="space-y-2">
+                                {data.schedule.slice(0, 2).map(item => (
+                                    <div key={item.id} className="bg-white p-3 rounded-xl border border-gray-100 shadow-sm">
+                                        <p className="font-bold text-sm text-gray-800">{item.title}</p>
+                                        <p className="text-xs text-gray-500 mt-0.5">{item.description}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // --- CENA C3: VER COMPROMISSOS ---
+        const SceneSchedule = () => {
+            const handleCancelCommitment = (commitment) => {
+                // Processo Pr2: Retira o compromisso da lista, notifica o grupo da saída e retira o usuário do evento
+                const updatedSchedule = data.schedule.filter(c => c.id !== commitment.id);
+
+                const updatedGroups = data.groups.map(grp => {
+                    if (grp.name !== commitment.group) return grp;
+                    const updatedEvents = (grp.events || []).map(ev => {
+                        if (ev.title !== commitment.title) return ev;
+                        return {
+                            ...ev,
+                            participants: (ev.participants || []).filter(p => p !== data.user.name)
+                        };
+                    });
+                    const newNotice = {
+                        id: Date.now(),
+                        text: `${data.user.name} saiu do evento "${commitment.title}".`,
+                        time: 'Agora'
+                    };
+                    return {
+                        ...grp,
+                        events: updatedEvents,
+                        notices: [newNotice, ...(grp.notices || [])]
+                    };
+                });
+
+                const newNotification = {
+                    id: Date.now() + 1,
+                    type: 'cancel',
+                    title: 'Compromisso cancelado',
+                    message: `Você saiu de "${commitment.title}". O grupo ${commitment.group || 'associado'} foi notificado.`,
+                    time: 'Agora',
+                    unread: true
+                };
+
+                setData({
+                    ...data,
+                    schedule: updatedSchedule,
+                    groups: updatedGroups,
+                    notifications: [newNotification, ...data.notifications]
+                });
+
+                showToast('Compromisso cancelado e grupo notificado!', 'info');
+            };
+
+            return (
+                <div className="p-4">
+                    <div className="flex items-center mb-6">
+                        <button onClick={() => navigate('C2')} className="mr-3 text-gray-500 hover:text-gray-800">
+                            <i className="fa-solid fa-arrow-left"></i>
+                        </button>
+                        <h2 className="text-2xl font-bold text-gray-800">Meus Compromissos</h2>
+                    </div>
+
+                    {data.schedule.length === 0 ? (
+                        <div className="bg-white p-8 rounded-2xl border border-gray-100 text-center">
+                            <i className="fa-regular fa-calendar-xmark text-4xl text-gray-300 mb-3"></i>
+                            <p className="text-gray-500 text-sm">Você não possui compromissos agendados.</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            {data.schedule.map(item => (
+                                <div key={item.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                                    <div className="flex justify-between items-start">
+                                        <div>
+                                            <h4 className="font-bold text-gray-900 text-base">{item.title}</h4>
+                                            <p className="text-xs text-gray-600 mt-1">
+                                                <strong>Descrição:</strong> {item.description}
+                                            </p>
+                                            {item.location && (
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                    <i className="fa-solid fa-location-dot mr-1 text-indigo-500"></i>{item.location}
+                                                </p>
+                                            )}
+                                            {item.group && (
+                                                <span className="inline-block mt-2 text-[11px] bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full font-semibold">
+                                                    {item.group}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <button
+                                            onClick={() => handleCancelCommitment(item)}
+                                            className="text-xs bg-red-50 text-red-600 font-bold px-3 py-1.5 rounded-lg hover:bg-red-100 transition shrink-0 ml-2"
+                                        >
+                                            Cancelar
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // --- CENA C4: VER MEUS GRUPOS ---
+        const SceneGroups = () => (
+            <div className="p-4 min-h-full">
+                <div className="flex items-center mb-6">
+                    <button onClick={() => navigate('C2')} className="mr-3 text-gray-500 hover:text-gray-800">
+                        <i className="fa-solid fa-arrow-left"></i>
+                    </button>
+                    <h2 className="text-2xl font-bold text-gray-800">Meus Grupos</h2>
+                </div>
+
+                <div className="space-y-3 mb-6">
+                    {data.groups.map(group => (
+                        <div
+                            key={group.id}
+                            onClick={() => navigate('C6', { group })}
+                            className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex justify-between items-center cursor-pointer hover:bg-gray-50 transition"
+                        >
+                            <div className="flex items-center min-w-0">
+                                <div className="w-11 h-11 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center font-bold text-lg mr-3 shrink-0">
+                                    {group.name.charAt(0).toUpperCase()}
+                                </div>
+                                <div className="truncate">
+                                    <h4 className="font-bold text-gray-800 truncate">{group.name}</h4>
+                                    <p className="text-xs text-gray-500">{group.members.length} integrante(s)</p>
+                                </div>
+                            </div>
+                            <i className="fa-solid fa-chevron-right text-gray-400 ml-2 shrink-0"></i>
+                        </div>
+                    ))}
+                </div>
+
+                <button
+                    onClick={() => navigate('C5')}
+                    className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 transition shadow-sm"
+                >
+                    <i className="fa-solid fa-plus mr-2"></i> Criar Novo Grupo
+                </button>
+            </div>
+        );
+
+        // --- CENA C5: CRIAR GRUPO ---
+        const SceneCreateGroup = () => {
+            const [groupName, setGroupName] = useState('');
+            const [membersInput, setMembersInput] = useState('');
+
+            const handleCreateGroup = () => {
+                // Processo Pr3: Validar dados incompletos
+                if (!groupName.trim() || !membersInput.trim()) {
+                    showToast('Dados incompletos! Informe o nome do grupo e os membros.', 'error');
+                    return;
+                }
+
+                const parsedMembers = membersInput
+                    .split(',')
+                    .map(m => m.trim())
+                    .filter(Boolean);
+
+                if (parsedMembers.length === 0) {
+                    showToast('Informe ao menos um membro para o grupo!', 'error');
+                    return;
+                }
+
+                const allMembers = parsedMembers.includes('Você') ? parsedMembers : ['Você', ...parsedMembers];
+
+                const newGroup = {
+                    id: Date.now(),
+                    name: groupName.trim(),
+                    members: allMembers,
+                    events: [],
+                    notices: []
+                };
+
+                setData({
+                    ...data,
+                    groups: [...data.groups, newGroup]
+                });
+
+                showToast('Grupo criado e convites enviados!', 'success');
+                navigate('C4');
+            };
+
+            return (
+                <div className="p-4">
+                    <div className="flex items-center mb-6">
+                        <button onClick={() => navigate('C4')} className="mr-3 text-gray-500 hover:text-gray-800">
+                            <i className="fa-solid fa-arrow-left"></i>
+                        </button>
+                        <h2 className="text-2xl font-bold text-gray-800">Criar Grupo</h2>
+                    </div>
+
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Nome do grupo:</label>
+                            <input
+                                type="text"
+                                value={groupName}
+                                onChange={e => setGroupName(e.target.value)}
+                                className="w-full p-3 border rounded-lg bg-white"
+                                placeholder="Ex: Futebol de Quinta"
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Membros do grupo (separados por vírgula):</label>
+                            <textarea
+                                rows="3"
+                                value={membersInput}
+                                onChange={e => setMembersInput(e.target.value)}
+                                className="w-full p-3 border rounded-lg bg-white"
+                                placeholder="Ex: Ana, Bruno, Carla"
+                            ></textarea>
+                        </div>
+
+                        <div className="flex gap-3 pt-2">
+                            <button
+                                onClick={() => navigate('C4')}
+                                className="flex-1 bg-gray-200 text-gray-700 font-bold py-3 rounded-lg hover:bg-gray-300 transition"
+                            >
+                                Voltar
+                            </button>
+                            <button
+                                onClick={handleCreateGroup}
+                                className="flex-1 bg-indigo-600 text-white font-bold py-3 rounded-lg hover:bg-indigo-700 transition"
+                            >
+                                Confirmar
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- CENA C6: VER INFORMAÇÕES DO GRUPO ---
+        const SceneGroupInfo = () => {
+            if (!activeGroup) return null;
+
+            const groupPolls = data.polls.filter(p => p.group === activeGroup.name);
+            const openPolls = groupPolls.filter(p => p.status === 'Aberta');
+            const closedPolls = groupPolls.filter(p => p.status !== 'Aberta');
+
+            return (
+                <div className="p-4">
+                    <div className="flex items-center mb-4">
+                        <button onClick={() => navigate('C4')} className="mr-3 text-gray-500 hover:text-gray-800">
+                            <i className="fa-solid fa-arrow-left"></i>
+                        </button>
+                        <h2 className="text-xl font-bold text-gray-800 truncate">{activeGroup.name}</h2>
+                    </div>
+
+                    {/* Avisos de saída/alterações do grupo */}
+                    {activeGroup.notices && activeGroup.notices.length > 0 && (
+                        <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                            <p className="text-xs font-bold text-amber-800 mb-1">
+                                <i className="fa-solid fa-bullhorn mr-1"></i> Avisos do Grupo
+                            </p>
+                            {activeGroup.notices.map(n => (
+                                <p key={n.id} className="text-xs text-amber-900">• {n.text} <span className="text-[10px] text-amber-600">({n.time})</span></p>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Botões de ação da C6 -> D2 */}
+                    <div className="grid grid-cols-2 gap-2.5 mb-5">
+                        <button
+                            onClick={() => navigate('C8', { group: activeGroup })}
+                            className="bg-indigo-600 text-white text-xs font-bold py-3 px-3 rounded-xl hover:bg-indigo-700 transition flex items-center justify-center"
+                        >
+                            <i className="fa-solid fa-plus mr-1.5"></i> Propor Enquete
+                        </button>
+                        <button
+                            onClick={() => navigate('C9')}
+                            className="bg-indigo-50 text-indigo-700 text-xs font-bold py-3 px-3 rounded-xl hover:bg-indigo-100 transition flex items-center justify-center"
+                        >
+                            <i className="fa-solid fa-list-check mr-1.5"></i> Acessar Enquetes
+                        </button>
+                    </div>
+
+                    {/* Agenda do Grupo */}
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-4">
+                        <h3 className="text-sm font-bold text-gray-800 mb-2">
+                            <i className="fa-solid fa-calendar-check text-indigo-600 mr-1.5"></i> Agenda do Grupo
+                        </h3>
+                        {(!activeGroup.events || activeGroup.events.length === 0) ? (
+                            <p className="text-xs text-gray-400">Nenhum evento confirmado neste grupo.</p>
+                        ) : (
+                            <div className="space-y-2.5">
+                                {activeGroup.events.map(ev => (
+                                    <div key={ev.id} className="p-2.5 bg-gray-50 rounded-lg border border-gray-100">
+                                        <p className="font-bold text-sm text-gray-800">{ev.title}</p>
+                                        <p className="text-xs text-gray-600 mt-0.5">{formatEventPeriod(ev)} {ev.location ? `• ${ev.location}` : ''}</p>
+                                        {ev.participants && ev.participants.length > 0 && (
+                                            <div className="mt-1.5 flex flex-wrap gap-1">
+                                                {ev.participants.map((p, idx) => (
+                                                    <span key={idx} className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-semibold">
+                                                        {p}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Enquetes Abertas */}
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-4">
+                        <h3 className="text-sm font-bold text-gray-800 mb-2">
+                            <i className="fa-solid fa-square-poll-vertical text-green-600 mr-1.5"></i> Enquetes Abertas ({openPolls.length})
+                        </h3>
+                        {openPolls.length === 0 ? (
+                            <p className="text-xs text-gray-400">Nenhuma enquete aberta.</p>
+                        ) : (
+                            <div className="space-y-2">
+                                {openPolls.map(p => (
+                                    <div
+                                        key={p.id}
+                                        onClick={() => navigate('C10', { poll: p })}
+                                        className="p-2.5 bg-green-50/60 border border-green-100 rounded-lg flex justify-between items-center cursor-pointer hover:bg-green-50"
+                                    >
+                                        <div>
+                                            <p className="text-xs font-bold text-gray-800">{p.name}</p>
+                                            <p className="text-[11px] text-gray-500">{formatPollPeriod(p)}</p>
+                                        </div>
+                                        <span className="text-[10px] font-bold text-green-700 bg-green-100 px-2 py-0.5 rounded-full">Votar</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Enquetes Encerradas */}
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-4">
+                        <h3 className="text-sm font-bold text-gray-800 mb-2">
+                            <i className="fa-solid fa-box-archive text-gray-500 mr-1.5"></i> Enquetes Encerradas ({closedPolls.length})
+                        </h3>
+                        {closedPolls.length === 0 ? (
+                            <p className="text-xs text-gray-400">Nenhuma enquete encerrada.</p>
+                        ) : (
+                            <div className="space-y-2">
+                                {closedPolls.map(p => (
+                                    <div
+                                        key={p.id}
+                                        onClick={() => navigate('C10', { poll: p })}
+                                        className="p-2.5 bg-gray-50 border border-gray-100 rounded-lg flex justify-between items-center cursor-pointer"
+                                    >
+                                        <p className="text-xs font-semibold text-gray-700">{p.name}</p>
+                                        <span className="text-[10px] font-bold text-gray-500">Ver resultado</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Integrantes do Grupo */}
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                        <h3 className="text-sm font-bold text-gray-800 mb-2">
+                            <i className="fa-solid fa-users text-indigo-600 mr-1.5"></i> Integrantes ({activeGroup.members.length})
+                        </h3>
+                        <div className="flex flex-wrap gap-1.5">
+                            {activeGroup.members.map((member, index) => (
+                                <span key={index} className="text-xs bg-gray-100 text-gray-700 px-2.5 py-1 rounded-full font-medium">
+                                    {member}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- CENA C7: VER NOTIFICAÇÕES ---
+        const SceneNotifications = () => {
+            const handleOpenNotification = (notif) => {
+                const updatedNotifs = data.notifications.map(n =>
+                    n.id === notif.id ? { ...n, unread: false } : n
+                );
+                setData({ ...data, notifications: updatedNotifs });
+
+                if (notif.pollId) {
+                    const targetPoll = data.polls.find(p => p.id === notif.pollId);
+                    if (targetPoll) {
+                        navigate('C10', { poll: targetPoll });
+                        return;
+                    }
+                }
+                if (notif.type === 'conflict' || notif.type === 'reminder' || notif.type === 'cancel') {
+                    navigate('C3');
+                }
+            };
+
+            return (
+                <div className="p-4">
+                    <div className="flex items-center mb-6">
+                        <button onClick={() => navigate('C2')} className="mr-3 text-gray-500 hover:text-gray-800">
+                            <i className="fa-solid fa-arrow-left"></i>
+                        </button>
+                        <h2 className="text-2xl font-bold text-gray-800">Notificações</h2>
+                    </div>
+
+                    {data.notifications.length === 0 ? (
+                        <p className="text-sm text-gray-400 text-center bg-white p-6 rounded-xl">Nenhuma notificação no momento.</p>
+                    ) : (
+                        <div className="space-y-3">
+                            {data.notifications.map(n => (
+                                <div
+                                    key={n.id}
+                                    onClick={() => handleOpenNotification(n)}
+                                    className={`p-4 rounded-xl border cursor-pointer transition ${
+                                        n.type === 'conflict'
+                                            ? 'bg-red-50 border-red-200'
+                                            : n.unread
+                                            ? 'bg-indigo-50/60 border-indigo-200'
+                                            : 'bg-white border-gray-100'
+                                    }`}
+                                >
+                                    <div className="flex justify-between items-start mb-1">
+                                        <h4 className={`text-sm font-bold ${n.type === 'conflict' ? 'text-red-800' : 'text-gray-800'}`}>
+                                            {n.type === 'conflict' && <i className="fa-solid fa-triangle-exclamation mr-1.5 text-red-600"></i>}
+                                            {n.title}
+                                        </h4>
+                                        <span className="text-[10px] text-gray-400 shrink-0 ml-2">{n.time}</span>
+                                    </div>
+                                    <p className={`text-xs ${n.type === 'conflict' ? 'text-red-700' : 'text-gray-600'}`}>{n.message}</p>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // --- CENA C8: CRIAR ENQUETE ---
+        const SceneCreatePoll = () => {
+            const [pollName, setPollName] = useState('');
+            const [selectedGroup, setSelectedGroup] = useState(activeGroup ? activeGroup.name : (data.groups[0] ? data.groups[0].name : ''));
+            const [pollEndDate, setPollEndDate] = useState('');
+            const [pollEndTime, setPollEndTime] = useState('');
+            const [selectedEventIds, setSelectedEventIds] = useState([]);
+
+            // Formulário expansível para novo evento (não registrado)
+            const [showNewEventForm, setShowNewEventForm] = useState(false);
+            const [newEvName, setNewEvName] = useState('');
+            const [newEvLocation, setNewEvLocation] = useState('');
+            const [newEvDate, setNewEvDate] = useState('');
+            const [newEvStartTime, setNewEvStartTime] = useState('');
+            const [newEvEndTime, setNewEvEndTime] = useState('');
+            const [newEvLink, setNewEvLink] = useState('');
+            const [customDraftEvents, setCustomDraftEvents] = useState([]);
+
+            const toggleEventSelection = (id) => {
+                setSelectedEventIds(prev =>
+                    prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+                );
+            };
+
+            const handleAddDraftEvent = () => {
+                if (!newEvName.trim() || !newEvLocation.trim()) {
+                    showToast('Informe o nome e a localidade do novo evento!', 'error');
+                    return;
+                }
+                const draft = {
+                    id: Date.now(),
+                    name: newEvName.trim(),
+                    location: newEvLocation.trim(),
+                    date: newEvDate,
+                    startTime: newEvStartTime,
+                    endTime: newEvEndTime,
+                    link: newEvLink.trim(),
+                    dates: formatEventPeriod({ date: newEvDate, startTime: newEvStartTime, endTime: newEvEndTime })
+                };
+                setCustomDraftEvents([...customDraftEvents, draft]);
+                setNewEvName('');
+                setNewEvLocation('');
+                setNewEvDate('');
+                setNewEvStartTime('');
+                setNewEvEndTime('');
+                setNewEvLink('');
+                setShowNewEventForm(false);
+                showToast('Novo evento adicionado à enquete!', 'success');
+            };
+
+            const handleCreate = () => {
+                if (!pollName.trim()) {
+                    showToast('Informe o título da enquete!', 'error');
+                    return;
+                }
+
+                const chosenRegistered = data.events.filter(ev => selectedEventIds.includes(ev.id));
+                const combinedEvents = [...chosenRegistered, ...customDraftEvents];
+
+                const options = combinedEvents.map((ev, idx) => ({
+                    id: Date.now() + idx + 1,
+                    text: ev.name,
+                    eventName: ev.name,
+                    location: ev.location,
+                    date: ev.date || '',
+                    startTime: ev.startTime || '',
+                    endTime: ev.endTime || '',
+                    votes: 0,
+                    voters: []
+                }));
+
+                // Sempre adiciona a opção "Indisponível"
+                options.push({
+                    id: Date.now() + 999,
+                    text: 'Indisponível',
+                    isUnavailable: true,
+                    votes: 0,
+                    voters: []
+                });
+
+                if (options.length <= 1) {
+                    showToast('Selecione ou adicione ao menos um evento além de indisponível!', 'error');
+                    return;
+                }
+
+                // Validação MoLIC: verificar inconsistência de horário entre encerramento da enquete e data dos eventos
+                if (pollEndDate) {
+                    const inconsistentEvent = options.find(opt => opt.date && pollEndDate > opt.date);
+                    if (inconsistentEvent) {
+                        showToast(`Inconsistência de horário: o encerramento da enquete (${formatDateBR(pollEndDate)}) não pode ser após o evento "${inconsistentEvent.text}" (${formatDateBR(inconsistentEvent.date)}).`, 'error');
+                        return;
+                    }
+                }
+
+                const now = new Date();
+                const createdAt = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()} às ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+                const newPoll = {
+                    id: Date.now(),
+                    name: pollName.trim(),
+                    status: 'Aberta',
+                    group: selectedGroup,
+                    endDate: pollEndDate,
+                    endTime: pollEndDate ? (pollEndTime || '23:59') : pollEndTime,
+                    createdAt,
+                    options
+                };
+
+                const updatedEvents = [...data.events, ...customDraftEvents];
+
+                setData({
+                    ...data,
+                    events: updatedEvents,
+                    polls: [newPoll, ...data.polls]
+                });
+
+                showToast('Enquete criada com sucesso!', 'success');
+                navigate('C9');
+            };
+
+            return (
+                <div className="p-4">
+                    <div className="flex items-center mb-6">
+                        <button onClick={() => navigate('C6')} className="mr-3 text-gray-500 hover:text-gray-800">
+                            <i className="fa-solid fa-arrow-left"></i>
+                        </button>
+                        <h2 className="text-2xl font-bold text-gray-800">Criar Enquete</h2>
+                    </div>
+
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Título da Enquete:</label>
+                            <input
+                                type="text"
+                                value={pollName}
+                                onChange={e => setPollName(e.target.value)}
+                                className="w-full p-3 border rounded-lg bg-white"
+                                placeholder="Ex: Confraternização de Fim de Ano"
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Grupo Destino:</label>
+                            <select value={selectedGroup} onChange={e => setSelectedGroup(e.target.value)} className="w-full p-3 border rounded-lg bg-white">
+                                {data.groups.map(g => <option key={g.id} value={g.name}>{g.name}</option>)}
+                            </select>
+                        </div>
+
+                        {/* Período de Duração da Enquete (Data e Horário) */}
+                        <div className="p-3.5 bg-indigo-50/70 border border-indigo-100 rounded-xl">
+                            <label className="block text-sm font-bold text-indigo-950 mb-1">
+                                <i className="fa-regular fa-clock text-indigo-600 mr-1.5"></i>
+                                Período de Duração da Enquete:
+                            </label>
+                            <p className="text-xs text-gray-600 mb-2.5">Defina a data e o horário limite para votação.</p>
+                            <div className="grid grid-cols-2 gap-2.5">
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">Data de encerramento:</label>
+                                    <input
+                                        type="date"
+                                        value={pollEndDate}
+                                        onChange={e => setPollEndDate(e.target.value)}
+                                        className="w-full p-2.5 border rounded-lg text-xs bg-white"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">Horário limite:</label>
+                                    <input
+                                        type="time"
+                                        value={pollEndTime}
+                                        onChange={e => setPollEndTime(e.target.value)}
+                                        className="w-full p-2.5 border rounded-lg text-xs bg-white"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">Escolher Eventos Registrados:</label>
+                            <div className="space-y-2">
+                                {data.events.map(ev => {
+                                    const checked = selectedEventIds.includes(ev.id);
+                                    return (
+                                        <div
+                                            key={ev.id}
+                                            onClick={() => toggleEventSelection(ev.id)}
+                                            className={`p-3 rounded-xl border cursor-pointer flex items-center justify-between transition ${checked ? 'bg-indigo-50 border-indigo-400' : 'bg-white border-gray-200'}`}
+                                        >
+                                            <div>
+                                                <p className="text-sm font-bold text-gray-800">{ev.name}</p>
+                                                <p className="text-xs text-gray-500">{ev.location} • {formatEventPeriod(ev)}</p>
+                                            </div>
+                                            <div className={`w-5 h-5 rounded flex items-center justify-center border ${checked ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-gray-300'}`}>
+                                                {checked && <i className="fa-solid fa-check text-xs"></i>}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Novos eventos adicionados nesta enquete */}
+                        {customDraftEvents.length > 0 && (
+                            <div className="space-y-2">
+                                <label className="block text-xs font-bold text-emerald-700 uppercase">Novos Eventos Adicionados:</label>
+                                {customDraftEvents.map(ev => (
+                                    <div key={ev.id} className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg flex justify-between items-center">
+                                        <div>
+                                            <p className="text-xs font-bold text-emerald-900">{ev.name}</p>
+                                            <p className="text-[11px] text-emerald-700">{ev.location} • {formatEventPeriod(ev)}</p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCustomDraftEvents(customDraftEvents.filter(item => item.id !== ev.id))}
+                                            className="text-red-500 text-xs px-2"
+                                        >
+                                            <i className="fa-solid fa-trash"></i>
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Botão expansível para novo evento (não registrado) */}
+                        <div>
+                            <button
+                                type="button"
+                                onClick={() => setShowNewEventForm(!showNewEventForm)}
+                                className="w-full py-2.5 px-3 border-2 border-dashed border-indigo-300 text-indigo-600 font-semibold text-xs rounded-xl hover:bg-indigo-50 transition"
+                            >
+                                <i className={`fa-solid ${showNewEventForm ? 'fa-chevron-up' : 'fa-plus'} mr-1.5`}></i>
+                                {showNewEventForm ? 'Ocultar formulário de novo evento' : 'Adicionar novo evento (não registrado)'}
+                            </button>
+
+                            {showNewEventForm && (
+                                <div className="mt-3 p-3.5 bg-gray-50 border border-gray-200 rounded-xl space-y-2.5">
+                                    <p className="text-xs font-bold text-gray-700">Dados do Novo Evento</p>
+                                    <input
+                                        type="text"
+                                        value={newEvName}
+                                        onChange={e => setNewEvName(e.target.value)}
+                                        placeholder="Nome do evento *"
+                                        className="w-full p-2.5 border rounded-lg text-xs bg-white"
+                                    />
+                                    <input
+                                        type="text"
+                                        value={newEvLocation}
+                                        onChange={e => setNewEvLocation(e.target.value)}
+                                        placeholder="Localidade *"
+                                        className="w-full p-2.5 border rounded-lg text-xs bg-white"
+                                    />
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-[11px] text-gray-500 mb-0.5">Data (opcional)</label>
+                                            <input type="date" value={newEvDate} onChange={e => setNewEvDate(e.target.value)} className="w-full p-2 border rounded-lg text-xs bg-white" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-gray-500 mb-0.5">Início (opcional)</label>
+                                            <input type="time" value={newEvStartTime} onChange={e => setNewEvStartTime(e.target.value)} className="w-full p-2 border rounded-lg text-xs bg-white" />
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-[11px] text-gray-500 mb-0.5">Término (opcional)</label>
+                                            <input type="time" value={newEvEndTime} onChange={e => setNewEvEndTime(e.target.value)} className="w-full p-2 border rounded-lg text-xs bg-white" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-gray-500 mb-0.5">Link (opcional)</label>
+                                            <input type="url" value={newEvLink} onChange={e => setNewEvLink(e.target.value)} placeholder="https://" className="w-full p-2 border rounded-lg text-xs bg-white" />
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={handleAddDraftEvent}
+                                        className="w-full bg-indigo-600 text-white font-bold py-2 rounded-lg text-xs hover:bg-indigo-700"
+                                    >
+                                        Incluir Evento na Enquete
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="p-2.5 bg-gray-100 rounded-lg text-xs text-gray-600">
+                            <i className="fa-solid fa-circle-info mr-1 text-indigo-500"></i>
+                            A opção <strong>"Indisponível"</strong> será incluída automaticamente na enquete.
+                        </div>
+
+                        <div className="flex gap-3 pt-2">
+                            <button onClick={() => navigate('C6')} className="flex-1 bg-gray-200 text-gray-700 font-bold py-3 rounded-lg hover:bg-gray-300 transition">
+                                Voltar
+                            </button>
+                            <button onClick={handleCreate} className="flex-1 bg-green-600 text-white font-bold py-3 rounded-lg hover:bg-green-700 transition">
+                                Seguir
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- CENA C9: VER ENQUETES ---
+        const ScenePolls = () => (
+            <div className="p-4">
+                <div className="flex items-center mb-6">
+                    <button onClick={() => navigate('C2')} className="mr-3 text-gray-500 hover:text-gray-800">
+                        <i className="fa-solid fa-arrow-left"></i>
+                    </button>
+                    <h2 className="text-2xl font-bold text-gray-800">Enquetes</h2>
+                </div>
+
+                <div className="space-y-3">
+                    {data.polls.map(poll => (
+                        <div
+                            key={poll.id}
+                            onClick={() => navigate('C10', { poll })}
+                            className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex justify-between items-center cursor-pointer hover:bg-gray-50"
+                        >
+                            <div>
+                                <h4 className="font-bold text-gray-800">{poll.name}</h4>
+                                <p className="text-xs text-gray-500">{poll.group} • {poll.options?.length || 0} opções</p>
+                                <p className="text-[11px] text-indigo-600 font-medium mt-1">
+                                    <i className="fa-regular fa-clock mr-1"></i>{formatPollPeriod(poll)}
+                                </p>
+                            </div>
+                            <span className={`text-xs px-2.5 py-1 rounded-full font-bold shrink-0 ${poll.status === 'Aberta' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                                {poll.status}
+                            </span>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+
+        // --- CENA C10: ACESSAR ENQUETE ---
+        const ScenePollDetails = () => {
+            if (!activePoll) return null;
+
+            const userCurrentVote = activePoll.options.find(opt => (opt.voters || []).includes(data.user.name));
+            const [selectedOptionId, setSelectedOptionId] = useState(userCurrentVote ? userCurrentVote.id : null);
+            const [showProposeBox, setShowProposeBox] = useState(false);
+            const [proposeType, setProposeType] = useState('registered');
+            const [selectedRegEventId, setSelectedRegEventId] = useState(data.events[0] ? data.events[0].id : '');
+
+            // Campos para novo evento não registrado na proposta
+            const [propName, setPropName] = useState('');
+            const [propLocation, setPropLocation] = useState('');
+            const [propDate, setPropDate] = useState('');
+            const [propStartTime, setPropStartTime] = useState('');
+            const [propEndTime, setPropEndTime] = useState('');
+            const [propLink, setPropLink] = useState('');
+
+            // Lista de participantes confirmados (votaram em qualquer opção que não seja Indisponível)
+            const confirmedParticipants = Array.from(
+                new Set(
+                    activePoll.options
+                        .filter(opt => !opt.isUnavailable)
+                        .flatMap(opt => opt.voters || [])
+                )
+            );
+
+            const handleVote = () => {
+                if (!selectedOptionId) {
+                    showToast('Selecione uma opção para votar!', 'error');
+                    return;
+                }
+
+                const updatedPolls = data.polls.map(p => {
+                    if (p.id !== activePoll.id) return p;
+                    const updatedOptions = p.options.map(opt => {
+                        const filteredVoters = (opt.voters || []).filter(v => v !== data.user.name);
+                        if (opt.id === selectedOptionId) {
+                            const nextVoters = [...filteredVoters, data.user.name];
+                            return { ...opt, voters: nextVoters, votes: nextVoters.length };
+                        }
+                        return { ...opt, voters: filteredVoters, votes: filteredVoters.length };
+                    });
+                    return { ...p, options: updatedOptions };
+                });
+
+                setData({ ...data, polls: updatedPolls });
+                showToast('Voto registrado com sucesso!', 'success');
+                navigate('C11', { poll: activePoll });
+            };
+
+            const handleProposeOption = () => {
+                let newOption = null;
+                let updatedEventsList = [...data.events];
+
+                if (proposeType === 'registered') {
+                    const foundEv = data.events.find(e => String(e.id) === String(selectedRegEventId));
+                    if (!foundEv) {
+                        showToast('Selecione um evento registrado!', 'error');
+                        return;
+                    }
+                    newOption = {
+                        id: Date.now(),
+                        text: foundEv.name,
+                        eventName: foundEv.name,
+                        location: foundEv.location,
+                        date: foundEv.date || '',
+                        startTime: foundEv.startTime || '',
+                        endTime: foundEv.endTime || '',
+                        votes: 0,
+                        voters: []
+                    };
+                } else {
+                    if (!propName.trim() || !propLocation.trim()) {
+                        showToast('Preencha nome e localidade do evento proposto!', 'error');
+                        return;
+                    }
+                    const createdEv = {
+                        id: Date.now(),
+                        name: propName.trim(),
+                        location: propLocation.trim(),
+                        date: propDate,
+                        startTime: propStartTime,
+                        endTime: propEndTime,
+                        link: propLink.trim(),
+                        dates: formatEventPeriod({ date: propDate, startTime: propStartTime, endTime: propEndTime })
+                    };
+                    updatedEventsList.push(createdEv);
+                    newOption = {
+                        id: Date.now() + 1,
+                        text: createdEv.name,
+                        eventName: createdEv.name,
+                        location: createdEv.location,
+                        date: createdEv.date,
+                        startTime: createdEv.startTime,
+                        endTime: createdEv.endTime,
+                        votes: 0,
+                        voters: []
+                    };
+                }
+
+                const updatedPolls = data.polls.map(p => {
+                    if (p.id !== activePoll.id) return p;
+                    const unavailableIdx = p.options.findIndex(o => o.isUnavailable);
+                    const nextOptions = [...p.options];
+                    if (unavailableIdx >= 0) {
+                        nextOptions.splice(unavailableIdx, 0, newOption);
+                    } else {
+                        nextOptions.push(newOption);
+                    }
+                    return { ...p, options: nextOptions };
+                });
+
+                setData({
+                    ...data,
+                    events: updatedEventsList,
+                    polls: updatedPolls
+                });
+
+                setPropName('');
+                setPropLocation('');
+                setPropDate('');
+                setPropStartTime('');
+                setPropEndTime('');
+                setPropLink('');
+                setShowProposeBox(false);
+                showToast('Nova opção adicionada à enquete!', 'success');
+            };
+
+            const handleConcludePoll = () => {
+                // Apura opção vencedora com maior número de votos
+                const sortedOptions = [...activePoll.options].sort((a, b) => (b.votes || 0) - (a.votes || 0));
+                const winner = sortedOptions[0];
+
+                const updatedPolls = data.polls.map(p =>
+                    p.id === activePoll.id
+                        ? { ...p, status: 'Encerrada', winnerOptionId: winner ? winner.id : null }
+                        : p
+                );
+
+                // Se vencedor for "Indisponível" ou sem votos, não adiciona evento à agenda
+                if (!winner || winner.isUnavailable) {
+                    setData({ ...data, polls: updatedPolls });
+                    showToast('Enquete encerrada sem evento vencedor (Indisponível).', 'info');
+                    navigate('C9');
+                    return;
+                }
+
+                const userVotedUnavailable = activePoll.options.some(
+                    opt => opt.isUnavailable && (opt.voters || []).includes(data.user.name)
+                );
+
+                const confirmedForEvent = Array.from(
+                    new Set(
+                        activePoll.options
+                            .filter(opt => !opt.isUnavailable)
+                            .flatMap(opt => opt.voters || [])
+                    )
+                );
+
+                // 1. Adiciona o evento vencedor na Agenda do Grupo (C6)
+                const updatedGroups = data.groups.map(grp => {
+                    if (grp.name !== activePoll.group) return grp;
+                    const groupEvent = {
+                        id: Date.now(),
+                        title: winner.eventName || winner.text,
+                        date: winner.date || '',
+                        startTime: winner.startTime || '',
+                        endTime: winner.endTime || '',
+                        location: winner.location || '',
+                        participants: confirmedForEvent
+                    };
+                    return {
+                        ...grp,
+                        events: [...(grp.events || []), groupEvent]
+                    };
+                });
+
+                // 2. Verifica conflito e adiciona na Agenda Pessoal do usuário (C3) se não votou Indisponível
+                let updatedSchedule = [...data.schedule];
+                let updatedNotifications = [...data.notifications];
+
+                if (!userVotedUnavailable) {
+                    const conflict = hasScheduleConflict(updatedSchedule, winner);
+                    if (conflict) {
+                        updatedNotifications = [
+                            {
+                                id: Date.now() + 5,
+                                type: 'conflict',
+                                title: 'Conflito de horário detectado!',
+                                message: `O evento "${winner.text}" (${formatEventPeriod(winner)}) conflita com "${conflict.title}" (${conflict.description}) e não foi marcado na sua agenda.`,
+                                time: 'Agora',
+                                unread: true
+                            },
+                            ...updatedNotifications
+                        ];
+                        showToast('Conflito de horário! Evento não marcado na sua agenda.', 'error');
+                    } else {
+                        const newScheduleItem = {
+                            id: Date.now() + 2,
+                            title: winner.eventName || winner.text,
+                            group: activePoll.group,
+                            date: winner.date || '',
+                            startTime: winner.startTime || '',
+                            endTime: winner.endTime || '',
+                            description: formatScheduleDescription(winner),
+                            location: winner.location || ''
+                        };
+                        updatedSchedule = [...updatedSchedule, newScheduleItem];
+                        showToast(`Evento vencedor "${winner.text}" adicionado à agenda!`, 'success');
+                    }
+                } else {
+                    showToast('Você marcou indisponível: evento adicionado apenas ao grupo.', 'info');
+                }
+
+                setData({
+                    ...data,
+                    polls: updatedPolls,
+                    groups: updatedGroups,
+                    schedule: updatedSchedule,
+                    notifications: updatedNotifications
+                });
+
+                navigate('C9');
+            };
+
+            return (
+                <div className="p-4">
+                    <div className="flex items-center mb-4">
+                        <button onClick={() => navigate('C9')} className="mr-3 text-gray-500 hover:text-gray-800">
+                            <i className="fa-solid fa-arrow-left"></i>
+                        </button>
+                        <h2 className="text-xl font-bold text-gray-800 truncate">{activePoll.name}</h2>
+                    </div>
+
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-4">
+                        <div className="flex justify-between items-center mb-2">
+                            <p className="text-sm text-gray-500">
+                                Status: <strong className={activePoll.status === 'Aberta' ? 'text-green-600' : 'text-gray-600'}>{activePoll.status}</strong>
+                            </p>
+                            <span className="text-xs text-gray-500"><i className="fa-solid fa-users mr-1"></i>{activePoll.group}</span>
+                        </div>
+
+                        <div className="mb-3 px-2.5 py-1.5 bg-indigo-50 border border-indigo-100 rounded-lg text-xs text-indigo-800 flex items-center justify-between">
+                            <span><i className="fa-regular fa-clock mr-1.5 text-indigo-600"></i><strong>Duração:</strong> {formatPollPeriod(activePoll)}</span>
+                            <span className="text-[11px] font-semibold text-indigo-600">{getPollRemainingText(activePoll)}</span>
+                        </div>
+
+                        {/* Participantes Confirmados na Enquete */}
+                        <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+                            <p className="text-xs font-bold text-emerald-900 mb-1.5">
+                                <i className="fa-solid fa-user-check mr-1.5 text-emerald-600"></i>
+                                Participantes Confirmados ({confirmedParticipants.length}):
+                            </p>
+                            {confirmedParticipants.length === 0 ? (
+                                <p className="text-[11px] text-emerald-700">Nenhum participante confirmado ainda.</p>
+                            ) : (
+                                <div className="flex flex-wrap gap-1">
+                                    {confirmedParticipants.map((person, idx) => (
+                                        <span key={idx} className="text-[11px] bg-white text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full font-semibold">
+                                            {person}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Opções de Voto */}
+                        <div className="space-y-2.5">
+                            {activePoll.options.map(opt => {
+                                const isSelected = selectedOptionId === opt.id;
+                                const isWinner = activePoll.status === 'Encerrada' && activePoll.winnerOptionId === opt.id;
+                                return (
+                                    <div
+                                        key={opt.id}
+                                        onClick={() => activePoll.status === 'Aberta' && setSelectedOptionId(opt.id)}
+                                        className={`p-3 rounded-xl border transition ${
+                                            activePoll.status === 'Aberta' ? 'cursor-pointer' : ''
+                                        } ${
+                                            isWinner
+                                                ? 'bg-amber-50 border-amber-400'
+                                                : opt.isUnavailable
+                                                ? isSelected
+                                                    ? 'bg-red-50 border-red-400'
+                                                    : 'bg-gray-50 border-gray-200'
+                                                : isSelected
+                                                ? 'bg-indigo-50 border-indigo-500'
+                                                : 'bg-white border-gray-200 hover:bg-gray-50'
+                                        }`}
+                                    >
+                                        <div className="flex justify-between items-start">
+                                            <div>
+                                                <div className="flex items-center gap-1.5">
+                                                    <span className={`text-sm font-bold ${opt.isUnavailable ? 'text-red-700' : 'text-gray-800'}`}>
+                                                        {opt.text}
+                                                    </span>
+                                                    {isWinner && (
+                                                        <span className="text-[10px] bg-amber-400 text-amber-950 font-extrabold px-2 py-0.5 rounded-full">
+                                                            <i className="fa-solid fa-trophy mr-1"></i>Vencedor
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                {!opt.isUnavailable && (
+                                                    <p className="text-xs text-indigo-700 font-medium mt-0.5">
+                                                        <i className="fa-regular fa-calendar mr-1"></i>
+                                                        {formatEventPeriod(opt)} {opt.location ? `• ${opt.location}` : ''}
+                                                    </p>
+                                                )}
+                                            </div>
+                                            <span className="text-xs font-bold bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full shrink-0">
+                                                {opt.votes || 0} voto(s)
+                                            </span>
+                                        </div>
+
+                                        {opt.voters && opt.voters.length > 0 && (
+                                            <div className="mt-2 flex flex-wrap gap-1">
+                                                {opt.voters.map((voter, idx) => (
+                                                    <span key={idx} className="text-[10px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+                                                        {voter}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {/* Propor outra opção */}
+                        {activePoll.status === 'Aberta' && (
+                            <div className="mt-4 pt-3 border-t border-gray-100">
+                                <button
+                                    type="button"
+                                    onClick={() => setShowProposeBox(!showProposeBox)}
+                                    className="w-full py-2 text-xs font-bold text-indigo-600 bg-indigo-50 rounded-lg hover:bg-indigo-100 transition"
+                                >
+                                    <i className="fa-solid fa-plus mr-1"></i>
+                                    {showProposeBox ? 'Fechar proposta de opção' : 'Propor outra opção de evento'}
+                                </button>
+
+                                {showProposeBox && (
+                                    <div className="mt-3 p-3 bg-gray-50 rounded-xl border border-gray-200 space-y-2.5">
+                                        <div className="flex gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => setProposeType('registered')}
+                                                className={`flex-1 py-1.5 text-xs font-bold rounded-lg ${proposeType === 'registered' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 border'}`}
+                                            >
+                                                Evento Registrado
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setProposeType('new')}
+                                                className={`flex-1 py-1.5 text-xs font-bold rounded-lg ${proposeType === 'new' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 border'}`}
+                                            >
+                                                Novo Evento
+                                            </button>
+                                        </div>
+
+                                        {proposeType === 'registered' ? (
+                                            <select
+                                                value={selectedRegEventId}
+                                                onChange={e => setSelectedRegEventId(e.target.value)}
+                                                className="w-full p-2.5 border rounded-lg text-xs bg-white"
+                                            >
+                                                {data.events.map(ev => (
+                                                    <option key={ev.id} value={ev.id}>
+                                                        {ev.name} ({formatEventPeriod(ev)})
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                <input
+                                                    type="text"
+                                                    value={propName}
+                                                    onChange={e => setPropName(e.target.value)}
+                                                    placeholder="Nome do evento *"
+                                                    className="w-full p-2 border rounded-lg text-xs bg-white"
+                                                />
+                                                <input
+                                                    type="text"
+                                                    value={propLocation}
+                                                    onChange={e => setPropLocation(e.target.value)}
+                                                    placeholder="Localidade *"
+                                                    className="w-full p-2 border rounded-lg text-xs bg-white"
+                                                />
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <input type="date" value={propDate} onChange={e => setPropDate(e.target.value)} className="w-full p-2 border rounded-lg text-xs bg-white" />
+                                                    <input type="time" value={propStartTime} onChange={e => setPropStartTime(e.target.value)} className="w-full p-2 border rounded-lg text-xs bg-white" />
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <input type="time" value={propEndTime} onChange={e => setPropEndTime(e.target.value)} className="w-full p-2 border rounded-lg text-xs bg-white" />
+                                                    <input type="url" value={propLink} onChange={e => setPropLink(e.target.value)} placeholder="Link (opcional)" className="w-full p-2 border rounded-lg text-xs bg-white" />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <button
+                                            type="button"
+                                            onClick={handleProposeOption}
+                                            className="w-full bg-indigo-600 text-white font-bold py-2 rounded-lg text-xs hover:bg-indigo-700"
+                                        >
+                                            Adicionar à Enquete
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    {activePoll.status === 'Aberta' ? (
+                        <div className="space-y-2.5">
+                            <button
+                                onClick={handleVote}
+                                className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 transition shadow-sm"
+                            >
+                                Confirmar Voto
+                            </button>
+                            <button
+                                onClick={handleConcludePoll}
+                                className="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl hover:bg-emerald-700 transition shadow-sm"
+                            >
+                                Encerrar Votação e Consolidar Evento
+                            </button>
+                        </div>
+                    ) : (
+                        <button
+                            onClick={() => navigate('C11', { poll: activePoll })}
+                            className="w-full bg-gray-800 text-white font-bold py-3 rounded-xl hover:bg-gray-900 transition"
+                        >
+                            Ver Resumo da Votação
+                        </button>
+                    )}
+                </div>
+            );
+        };
+
+        // --- CENA C11: ACOMPANHAR VOTAÇÃO ---
+        const ScenePollStatus = () => {
+            if (!activePoll) return null;
+
+            const totalVotes = activePoll.options.reduce((acc, opt) => acc + (opt.votes || 0), 0);
+
+            const handleCancelVote = () => {
+                const updatedPolls = data.polls.map(p => {
+                    if (p.id !== activePoll.id) return p;
+                    const updatedOptions = p.options.map(opt => {
+                        const filtered = (opt.voters || []).filter(v => v !== data.user.name);
+                        return { ...opt, voters: filtered, votes: filtered.length };
+                    });
+                    return { ...p, options: updatedOptions };
+                });
+                setData({ ...data, polls: updatedPolls });
+                showToast('Voto cancelado!', 'info');
+                navigate('C10');
+            };
+
+            return (
+                <div className="p-4">
+                    <div className="flex items-center mb-6">
+                        <button onClick={() => navigate('C10')} className="mr-3 text-gray-500 hover:text-gray-800">
+                            <i className="fa-solid fa-arrow-left"></i>
+                        </button>
+                        <h2 className="text-xl font-bold text-gray-800">Acompanhar Votação</h2>
+                    </div>
+
+                    <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-4">
+                        <h3 className="font-bold text-gray-900 mb-1">{activePoll.name}</h3>
+                        <p className="text-xs text-gray-500 mb-4">{activePoll.group}</p>
+
+                        <div className="space-y-3">
+                            {activePoll.options.map(opt => {
+                                const votes = opt.votes || 0;
+                                const pct = totalVotes > 0 ? Math.round((votes / totalVotes) * 100) : 0;
+                                return (
+                                    <div key={opt.id}>
+                                        <div className="flex justify-between text-xs font-bold mb-1">
+                                            <span className={opt.isUnavailable ? 'text-red-600' : 'text-gray-800'}>
+                                                {opt.text} {!opt.isUnavailable && opt.date ? `(${formatDateBR(opt.date)})` : ''}
+                                            </span>
+                                            <span className="text-indigo-600">{votes} ({pct}%)</span>
+                                        </div>
+                                        <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                                            <div
+                                                className={`h-full rounded-full ${opt.isUnavailable ? 'bg-red-400' : 'bg-indigo-600'}`}
+                                                style={{ width: `${pct}%` }}
+                                            ></div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        <div className="border-t pt-4 text-xs text-gray-600 space-y-1.5 mt-4">
+                            <div className="flex justify-between">
+                                <span><i className="fa-solid fa-check-to-slot mr-1 text-indigo-500"></i> Total de votos: <strong>{totalVotes}</strong></span>
+                                <span className="text-orange-600 font-bold">{getPollRemainingText(activePoll)}</span>
+                            </div>
+                            <div className="flex justify-between text-gray-500">
+                                <span><i className="fa-regular fa-calendar-plus mr-1"></i> Criada em: {activePoll.createdAt || 'Hoje'}</span>
+                                <span><i className="fa-regular fa-clock mr-1"></i> {formatPollPeriod(activePoll)}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {activePoll.status === 'Aberta' && (
+                        <button
+                            onClick={handleCancelVote}
+                            className="w-full bg-red-100 text-red-600 font-bold py-3 rounded-lg hover:bg-red-200 transition mb-2.5"
+                        >
+                            Cancelar Votação
+                        </button>
+                    )}
+
+                    <button
+                        onClick={() => navigate('C10')}
+                        className="w-full bg-gray-200 text-gray-700 font-bold py-3 rounded-lg hover:bg-gray-300 transition"
+                    >
+                        Voltar para a enquete
+                    </button>
+                </div>
+            );
+        };
+
+        // --- CENA C12: VER EVENTOS ---
+        const SceneEvents = () => (
+            <div className="p-4">
+                <div className="flex items-center mb-6">
+                    <button onClick={() => navigate('C2')} className="mr-3 text-gray-500 hover:text-gray-800">
+                        <i className="fa-solid fa-arrow-left"></i>
+                    </button>
+                    <h2 className="text-2xl font-bold text-gray-800">Eventos e Locais</h2>
+                </div>
+
+                <div className="space-y-4 mb-6">
+                    {data.events.map(ev => (
+                        <div key={ev.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                            <h4 className="font-bold text-lg text-indigo-700 mb-1">{ev.name}</h4>
+                            <p className="text-sm text-gray-600 mb-1"><i className="fa-solid fa-location-dot mr-2 w-4"></i>{ev.location}</p>
+                            
+                            {/* Período destrinchado para comparação */}
+                            <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-2.5 my-2 text-xs space-y-1">
+                                <div className="flex items-center text-indigo-900 font-semibold">
+                                    <i className="fa-solid fa-calendar-day mr-2 text-indigo-600"></i>
+                                    <span>Data: {ev.date ? formatDateBR(ev.date) : 'A definir'}</span>
+                                </div>
+                                {ev.startTime && (
+                                    <div className="flex items-center text-indigo-800">
+                                        <i className="fa-regular fa-clock mr-2 text-indigo-500"></i>
+                                        <span>Horário início: {ev.startTime} {ev.endTime ? `| Término: ${ev.endTime}` : ''}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            {ev.link && (
+                                <a href={ev.link} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-500 underline mt-1 inline-block">
+                                    <i className="fa-solid fa-link mr-1"></i>Ver Link
+                                </a>
+                            )}
+                        </div>
+                    ))}
+                </div>
+
+                <button onClick={() => navigate('C13')} className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 transition">
+                    <i className="fa-solid fa-plus mr-2"></i> Adicionar Evento
+                </button>
+            </div>
+        );
+
+        // --- CENA C13: ADICIONAR EVENTO ---
+        const SceneAddEvent = () => {
+            const [name, setName] = useState('');
+            const [date, setDate] = useState('');
+            const [startTime, setStartTime] = useState('');
+            const [endTime, setEndTime] = useState('');
+            const [link, setLink] = useState('');
+            const [location, setLocation] = useState('');
+
+            const handleSave = () => {
+                if (!name.trim() || !location.trim()) {
+                    showToast('Preencha os campos obrigatórios (Nome do evento e Localidade)!', 'error');
+                    return;
+                }
+                const formattedDates = formatEventPeriod({ date, startTime, endTime });
+                const newEvent = {
+                    id: Date.now(),
+                    name: name.trim(),
+                    date,
+                    startTime,
+                    endTime,
+                    dates: formattedDates,
+                    link: link.trim(),
+                    location: location.trim()
+                };
+                setData({ ...data, events: [...data.events, newEvent] });
+                
+                showToast('Evento registrado com sucesso!', 'success');
+                navigate('C12');
+            };
+
+            return (
+                <div className="p-4">
+                    <div className="flex items-center mb-6">
+                        <button onClick={() => navigate('C12')} className="mr-3 text-gray-500 hover:text-gray-800">
+                            <i className="fa-solid fa-arrow-left"></i>
+                        </button>
+                        <h2 className="text-2xl font-bold text-gray-800">Adicionar Evento</h2>
+                    </div>
+
+                    <div className="space-y-3">
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Nome do evento:*</label>
+                            <input type="text" value={name} onChange={e => setName(e.target.value)} className="w-full p-3 border rounded-lg" placeholder="Ex: Sítio Bela Vista" />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Localidade:*</label>
+                            <input type="text" value={location} onChange={e => setLocation(e.target.value)} className="w-full p-3 border rounded-lg" placeholder="Endereço ou Região" />
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-2">
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-700 mb-1">Data (opcional):</label>
+                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full p-2.5 border rounded-lg text-sm bg-white" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-gray-700 mb-1">Horário início (opcional):</label>
+                                <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} className="w-full p-2.5 border rounded-lg text-sm bg-white" />
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Horário término (opcional):</label>
+                            <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} className="w-full p-2.5 border rounded-lg text-sm bg-white" />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-1">Link (opcional):</label>
+                            <input type="url" value={link} onChange={e => setLink(e.target.value)} className="w-full p-3 border rounded-lg" placeholder="https://" />
+                        </div>
+                    </div>
+
+                    <div className="mt-6 flex gap-3">
+                        <button onClick={() => navigate('C12')} className="flex-1 bg-gray-200 text-gray-700 font-bold py-3 rounded-lg hover:bg-gray-300 transition">
+                            Cancelar
+                        </button>
+                        <button onClick={handleSave} className="flex-1 bg-green-600 text-white font-bold py-3 rounded-lg hover:bg-green-700 transition">
+                            Salvar
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- NAVEGAÇÃO UBÍQUA ---
+        const bottomNavItems = [
+            { scene: 'C2', icon: 'fa-house', label: 'Início' },
+            { scene: 'C3', icon: 'fa-calendar-days', label: 'Agenda' },
+            { scene: 'C4', icon: 'fa-users', label: 'Grupos' },
+            { scene: 'C9', icon: 'fa-square-poll-vertical', label: 'Enquetes' },
+            { scene: 'C1', icon: 'fa-right-from-bracket', label: 'Sair' }
+        ];
+
+        // --- RENDERIZADOR PRINCIPAL ---
+        const renderScene = () => {
+            switch (currentScene) {
+                case 'C1': return <SceneLogin />;
+                case 'C2': return <SceneHome />;
+                case 'C3': return <SceneSchedule />;
+                case 'C4': return <SceneGroups />;
+                case 'C5': return <SceneCreateGroup />;
+                case 'C6': return <SceneGroupInfo />;
+                case 'C7': return <SceneNotifications />;
+                case 'C8': return <SceneCreatePoll />;
+                case 'C9': return <ScenePolls />;
+                case 'C10': return <ScenePollDetails />;
+                case 'C11': return <ScenePollStatus />;
+                case 'C12': return <SceneEvents />;
+                case 'C13': return <SceneAddEvent />;
+                default: return <SceneHome />;
+            }
+        };
+
+        const showBottomNav = currentScene !== 'C1';
+
+        return (
+            <div className="app-container">
+                {/* Status Bar */}
+                <div className="h-6 shrink-0 bg-gray-900 w-full flex justify-between items-center px-4 text-xs text-white">
+                    <span>9:41</span>
+                    <div className="flex space-x-1">
+                        <i className="fa-solid fa-signal"></i>
+                        <i className="fa-solid fa-wifi"></i>
+                        <i className="fa-solid fa-battery-full"></i>
+                    </div>
+                </div>
+
+                {/* Área Scrollável */}
+                <div className="scrollable-content bg-gray-50 relative">
+                    {/* Mensagem Toast */}
+                    {toast && (
+                        <div className={`sticky top-3 mx-4 mt-3 ${toast.type === 'error' ? 'bg-red-600' : 'bg-gray-800'} text-white text-xs font-semibold p-3 rounded-xl shadow-xl z-50 flex items-center justify-between`}>
+                            <span className="pr-2">{toast.message}</span>
+                            <button onClick={() => setToast(null)} className="text-white/80 hover:text-white shrink-0">
+                                <i className="fa-solid fa-times"></i>
+                            </button>
+                        </div>
+                    )}
+                    
+                    {/* Renderização da Cena Ativa */}
+                    {renderScene()}
+                </div>
+
+                {/* Navegação Ubíqua */}
+                {showBottomNav && (
+                    <div className="absolute bottom-0 w-full bg-white border-t border-gray-200 flex justify-around pb-4 pt-2 px-2 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+                        {bottomNavItems.map(item => (
+                            <div 
+                                key={item.scene}
+                                onClick={() => navigate(item.scene)}
+                                className={`flex flex-col items-center justify-center w-16 cursor-pointer transition-colors ${currentScene === item.scene ? 'text-indigo-600' : 'text-gray-400 hover:text-indigo-400'}`}
+                            >
+                                <i className={`fa-solid ${item.icon} text-xl mb-1`}></i>
+                                <span className="text-[10px] font-semibold">{item.label}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+</script>
+
+</body>
+</html>
